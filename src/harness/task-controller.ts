@@ -16,6 +16,7 @@ import { createAgentSession, type AgentSession } from "./session.js";
 import { createCodingTools } from "../tools/coding-tools.js";
 import { recoverTools, type ToolRecoveryAdapter } from "./recovery.js";
 import { hash, inputFingerprint, trustedHashes, Verifier } from "./verifier.js";
+import { TaskBlockedError } from "./task-errors.js";
 
 export const defaultTaskDirectory = fileURLToPath(new URL("../../.codeagent", import.meta.url));
 export interface TaskServices { tools?: AgentTool[]; recovery?: Record<string, ToolRecoveryAdapter>; leaseRegistry?: string; platform?: () => Promise<WindowsHost> }
@@ -149,11 +150,13 @@ export class TaskController {
     await this.commit({ type: "evidence_invalidated", reason: "resume：历史证据需要重新验证当前工作区" });
   }
   private async fresh(evidence: VerificationEvidence[]): Promise<boolean> {
-    const state = this.state; if (JSON.stringify(await trustedHashes(state.spec)) !== JSON.stringify(state.trustedHashes)) return false;
-    for (const item of evidence) {
-      if (item.specVersion !== state.specVersion || item.verifierManifestHash !== state.verifierManifestHash || item.inputFingerprint !== await inputFingerprint(this.environment, state.spec.verifiers.find(v => v.id === item.verificationId)!.inputs)) return false;
-      for (const [path, digest] of Object.entries(item.artifactHashes)) if (digest !== hash(await readFile(await this.environment.path(path)))) return false;
-    } return true;
+    try {
+      const state = this.state; if (JSON.stringify(await trustedHashes(state.spec)) !== JSON.stringify(state.trustedHashes)) return false;
+      for (const item of evidence) {
+        if (item.specVersion !== state.specVersion || item.verifierManifestHash !== state.verifierManifestHash || item.inputFingerprint !== await inputFingerprint(this.environment, state.spec.verifiers.find(v => v.id === item.verificationId)!.inputs)) return false;
+        for (const [path, digest] of Object.entries(item.artifactHashes)) if (digest !== hash(await readFile(await this.environment.path(path)))) return false;
+      } return true;
+    } catch (error) { throw new TaskBlockedError("verification_inputs_changed", "最终证据无法核查，需恢复文件后重新验收", { cause: error }); }
   }
   private async finish(evidence: VerificationEvidence[], signal: AbortSignal): Promise<TaskState | undefined> {
     if (!await this.fresh(evidence)) return this.settle("blocked", "verification_inputs_changed：最终证据失效");
@@ -164,6 +167,9 @@ export class TaskController {
       if (this.contractChanged) return undefined;
       throwIfAborted(signal);
       for (const m of this.state.spec.milestones) await this.commit({ type: "milestone_verified", milestoneId: m.id, evidenceIds: evidence.filter(e => m.verificationIds.includes(e.verificationId)).map(e => e.id) });
+      // Commands may have awaited I/O since the first check. Bind success to
+      // the last observed files while cooperative publication is serialized.
+      if (!await this.fresh(evidence)) return this.settle("blocked", "verification_inputs_changed：最终证据失效");
       return this.settle("succeeded", undefined, evidence.map(e => e.id));
     });
   }
@@ -236,7 +242,7 @@ export class TaskController {
       if (this.pollError) throw new Error(`persistence_error：停止未确认持久化；${this.redactor.text(errorText(this.pollError))}`);
       const message = this.redactor.text(errorText(error));
       if (message.includes("persistence_error")) throw error;
-      return this.settle(message.includes("effect_unknown") || message.includes("trusted_file_changed") ? "blocked" : "failed", message);
+      return this.settle(error instanceof TaskBlockedError ? "blocked" : "failed", message);
     }
   }
   async close(): Promise<void> {

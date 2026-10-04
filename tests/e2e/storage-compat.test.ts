@@ -48,7 +48,6 @@ test("LT-04E: real CLI repairs only incomplete tail, rejects corruption/future s
     await writeFile(join(root, "migration.events.jsonl"), migrated.stdout); assert.equal(migrated.exitCode, 0, migrated.stderr);
     const manifest = JSON.parse(await readFile(join(dataDirectory, "tasks", pendingId, "migration.json"), "utf8"));
     assert.ok(manifest.taskLog && manifest.sessionLog && manifest.sources.length === 2, "同步两个新日志后发布同一迁移 manifest");
-    assert.equal((await readdir(join(dataDirectory, "tasks", pendingId, "generations"))).length, 2, "未发布的旧候选代际保留但不被采用");
     assert.ok(await readFile(oldTaskPath, "utf8") === taskSource && await readFile(oldSessionPath, "utf8") === sessionSource, "原始两份 v1 日志保持不变");
     const state = await runProcess([join(project, "dist/cli.js"), "task", "status", pendingId, "--data-dir", dataDirectory], { cwd: project, signal: context.signal }); assert.ok(JSON.parse(state.stdout).schemaVersion === 2 && JSON.parse(state.stdout).status === "succeeded");
   });

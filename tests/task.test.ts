@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createTaskController, TaskRepository, type TaskDefinition } from "../src/index.js";
@@ -99,6 +99,22 @@ test("a later verifier changing an already verified output invalidates final suc
   const result = await controller.start();
   assert.ok(result.status === "blocked" && result.reason?.includes("证据失效"), "A passed output receipt cannot authorize a subsequently changed artifact");
 });
+
+for (const change of ["source", "missing-output", "missing-verifier"] as const) {
+  test(`final commit rejects ${change} changed after the first evidence freshness check`, async context => {
+    const f = await taskFixture(context);
+    const controller = await createTaskController({ spec: f.spec, dataDirectory: f.dataDirectory, config,
+      gateway: new FakeGateway(() => assistant()), testHooks: { barrier: async name => {
+        if (name !== "before_success") return;
+        if (change === "source") await writeFile(join(f.cwd, "source.txt"), "changed after verification");
+        else await unlink(change === "missing-output" ? join(f.cwd, "source.txt") : f.verifier);
+      } } });
+    f.cleanupAfter(() => controller.close());
+    const state = await controller.start();
+    assert.ok(state.status === "blocked" && !state.finalEvidenceIds.length,
+      "核查后变更或缺失的源码 / 产物 / 验收文件不能授权成功，也不能变成不可恢复失败");
+  });
+}
 
 test("final acceptance cannot omit a milestone's contract or bypass disabled process capability", async (context) => {
   const f = await taskFixture(context);

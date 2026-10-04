@@ -47,6 +47,12 @@ if (stage === 'parse') {
       assert.throws(() => parseOrders('order_id,sku,quantity,unit_price\\nA,B,' + q + ',' + p + '\\n'), q + '/' + p + ' must be rejected');
     }
   });
+  await check('reject missing or incorrect fixed CSV header', async () => {
+    const { parseOrders } = await import(pathToFileURL(join(root, 'src/parse.mts')).href);
+    for (const input of ['sku,order_id,quantity,unit_price\\nB,A,1,1.00\\n', 'A,B,1,1.00\\n']) {
+      assert.throws(() => parseOrders(input), 'missing or incorrect header must be rejected');
+    }
+  });
 } else if (stage === 'calculate') {
   await check('quantity, cents, discount and stable order', async () => {
     const { calculateOrders } = await import(pathToFileURL(join(root, 'src/calculate.mts')).href);

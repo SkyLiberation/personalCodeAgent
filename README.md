@@ -109,7 +109,7 @@ pnpm smoke
 pnpm test:e2e
 ```
 
-命令先构建，再串行执行原有 CLI、LT-01 / LT-02、恢复 / 控制 / 故障 / 迁移与报价 HTTP 用例。模型相关执行使用真实 MiMo，会消耗 API 配额，独立于 `pnpm test`。工作区、事件日志和报告保存在 `.codeagent/e2e/run-*`；平台证据另保存在 `.codeagent/platform-*`。26 个 E2E 的分组通过记录见 [第二阶段验收](docs/long-tasks-phase2-implementation.md)。
+命令先构建，再串行执行原有 CLI、LT-01 / LT-02、恢复 / 控制 / 故障 / 迁移、报价 HTTP 和 HT-01 / HT-02 / HT-03 用例。模型相关执行使用真实 MiMo，会消耗 API 配额，独立于 `pnpm test`。工作区、事件日志和报告保存在 `.codeagent/e2e/run-*`；平台证据另保存在 `.codeagent/platform-*`。原 26 个 E2E 的分组通过记录见 [第二阶段验收](docs/long-tasks-phase2-implementation.md)，本轮结果见 [补强实现记录](docs/long-tasks-hardening-implementation.md)。
 
 ## 初版边界
 
@@ -124,3 +124,5 @@ pnpm test:e2e
 长任务支持阶段 / 最终独立验收、失败反馈、持久证据和显式跨进程恢复。`task resume` 会先核查旧效果并重验当前文件；`task pause / cancel / update` 使用持久命令，`task command-status` 可查询应用结果。LT-01 / LT-02 与第二阶段真实 E2E 已通过；上下文压缩和全局模型预算等后续能力仍按 [处理方案](docs/long-tasks.md) 推进。
 
 长任务第二阶段已提供工具回执 / 文件后置条件核查、完整合同版本更新和 Windows 执行权 / 进程托管。旧格式仅自动迁移具有完整未启动证据的空任务，有执行历史且证据不足的 v1 任务保持只读。运行说明、平台条件和实际证据见 [第二阶段实现记录](docs/long-tasks-phase2-implementation.md)。
+
+本轮补强在成功提交前再次核查证据；未确认写入的目标文件或回执暂时无法读取时保持可恢复阻塞，不重放副作用。更长依赖链工程、上下文缩减、累计请求预算和无进展控制的验收定义见 [第三阶段 E2E 规格](docs/long-tasks-phase3-e2e.md)，这些下一阶段功能仍未实现。

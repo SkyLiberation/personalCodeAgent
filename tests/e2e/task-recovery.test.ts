@@ -1,7 +1,7 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { fork } from "node:child_process";
-import { readFile, writeFile, unlink } from "node:fs/promises";
+import { readFile, writeFile, unlink, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { TaskRepository, sendTaskCommand, readTaskCommandResult, type TaskState } from "../../src/index.js";
 import { quoteFixture } from "./quote-service-fixture.js";
@@ -38,13 +38,19 @@ test("LT-10 / LT-07B / LT-08A: pause at verified amount, change workspace, new p
 test("LT-04A/B: effect receipt recovery blocks unknown, never repeats delivery", { timeout: 900_000 }, async context => {
   await scenario(context, "phase2-receipt-recovery", async ({ root, cwd }) => {
     const spec = await valueFixture(root, cwd, 42, true); await writeFile(join(root, "receipt-enabled"), "true");
+    await writeFile(join(root, "audit-model-enabled"), "true");
     const file = join(root, "task.json"); await writeFile(file, JSON.stringify(spec));
     const w = worker(root, "start", file, "tool_effect_completed:record-delivery"); context.after(() => w.close());
     const id = String((await w.wait("task")).id); await w.wait("barrier"); await w.close();
     await writeFile(join(root, "unknown"), "unknown");
     const before = await TaskRepository.read(join(root, "state"), id);
+    const requestAudit = await readFile(join(root, "model-requests.jsonl"), "utf8");
     const blocked = await resume(root, id);
     assert.ok(blocked.status === "blocked" && blocked.reason?.includes("effect_unknown") && blocked.runs === before.runs, "未知副作用在后续模型请求之前阻塞");
+    assert.equal(await readFile(join(root, "model-requests.jsonl"), "utf8"), requestAudit, "未知效果期间没有实际模型请求");
+    const resumeLogs = (await readdir(root)).filter(name => name.startsWith("resume-") && name.endsWith(".events.jsonl"));
+    const resumedEvents = (await Promise.all(resumeLogs.map(name => readFile(join(root, name), "utf8")))).flatMap(log => log.trim().split("\n").filter(Boolean).map(line => JSON.parse(line)));
+    assert.ok(!resumedEvents.some(e => e.type === "agent_event" && e.event.type === "tool_started"), "未知效果期间没有工具启动");
     const logs = await readFile(join(root, "audit.jsonl"), "utf8"); assert.equal(logs.trim().split("\n").length, 1);
     await unlink(join(root, "unknown")); const result = await resume(root, id); await writeFile(join(root, "final-state.json"), JSON.stringify(result, null, 2));
     assert.equal(result.status, "succeeded"); assert.equal((await readFile(join(root, "audit.jsonl"), "utf8")).trim().split("\n").length, 1, "原调用不能重放");
@@ -58,11 +64,20 @@ for (const barrier of ["run_planned", "input_accepted", "session_run_settled", "
       const spec = await valueFixture(root, cwd); const file = join(root, "task.json"); await writeFile(file, JSON.stringify(spec));
       const w = worker(root, "start", file, barrier); context.after(() => w.close());
       const id = String((await w.wait("task")).id); await w.wait("barrier"); await w.close();
-      const before = await TaskRepository.read(join(root, "state"), id); const result = await resume(root, id);
+      const before = await TaskRepository.read(join(root, "state"), id);
+      const orphanIds = barrier === "verification_artifact_written" ? (await readdir(join(root, "state", "tasks", id, "evidence"))).map(name => name.replace(/\.json$/, "")).filter(evidenceId => !before.evidence.some(e => e.id === evidenceId)) : [];
+      const verificationAudit = barrier === "verification_artifact_written" ? await readFile(join(root, "verifier-runs.jsonl"), "utf8") : "";
+      const result = await resume(root, id);
       await writeFile(join(root, "final-state.json"), JSON.stringify(result, null, 2));
       assert.ok(result.status === "succeeded" && result.id === id && result.sessionId === before.sessionId && result.runs >= before.runs, "恢复完成且身份、已预留用量保留");
       const facts = (await readFile(join(root, "state", "sessions", `${result.sessionId}.jsonl`), "utf8")).trim().split("\n").slice(1).map(line => JSON.parse(line));
-      const inputs = facts.filter(f => f.kind === "input"); assert.equal(new Set(inputs.map(f => f.inputId)).size, inputs.length, "input ID 不重复接收");
+      const originalInputs = facts.filter(f => f.kind === "input" && f.inputId === before.activeRun!.inputId);
+      assert.ok(originalInputs.length === 1 && originalInputs[0].runId === before.activeRun!.runId && originalInputs[0].contentHash === before.activeRun!.contentHash,
+        "保留原计划的输入身份和内容，不能丢弃或换 ID 重复接收");
+      if (barrier === "verification_artifact_written") {
+        assert.ok(orphanIds.length > 0 && !result.finalEvidenceIds.some(id => orphanIds.includes(id)), "孤立验收附件不得成为最终证据");
+        assert.ok((await readFile(join(root, "verifier-runs.jsonl"), "utf8")).length > verificationAudit.length, "恢复实际执行新的独立验收");
+      }
       if (barrier.includes("write")) assert.ok(facts.some(f => f.kind === "tool_recovery" && f.classification === "observed_postcondition"), "默认文件工具只核对后置条件");
     });
   });

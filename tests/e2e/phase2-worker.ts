@@ -1,11 +1,18 @@
 import { readFile, open } from "node:fs/promises";
 import { join } from "node:path";
-import { createTaskController, openTaskController, loadConfig, type TaskServices } from "../../src/index.js";
+import { createTaskController, openTaskController, PiModelGateway, loadConfig, type TaskServices } from "../../src/index.js";
+import type { ModelGateway } from "../../src/contracts.js";
 const [mode, root, argument, barrier = ""] = process.argv.slice(2) as [string,string,string,string];
 const config = loadConfig();
 async function durable(path: string, content: string, flag: "a" | "wx") {
   const file = await open(path, flag, 0o600); try { await file.writeFile(content); await file.sync(); } finally { await file.close(); }
 }
+const auditModel = await readFile(join(root, "audit-model-enabled"), "utf8").then(() => true, () => false);
+const pi = auditModel ? new PiModelGateway(config) : undefined;
+const gateway: ModelGateway | undefined = pi ? { async *stream(request, signal) {
+  await durable(join(root, "model-requests.jsonl"), JSON.stringify({ pid: process.pid, timestamp: Date.now() }) + "\n", "a");
+  yield* pi.stream(request, signal);
+} } : undefined;
 const services: TaskServices = {
   tools: [{ name: "record-delivery", description: "Record the required unique delivery audit marker. Call once when requested.", parameters: { type: "object", properties: {}, additionalProperties: false }, effect: "write", replay: "never", version: "1", validate: value => value, execute: async (_args, context) => {
     const receipt = { operationId: context.operationId, callId: context.callId, text: "交付登记已保存", isError: false };
@@ -29,8 +36,8 @@ const taskServices = receiptEnabled || holdEnabled ? services : {};
 const hooks = { barrier: async (name: string) => { if (name === barrier) { process.send?.({ type: "barrier", name }); await new Promise<void>(resolve => process.once("message", () => resolve())); } } };
 try {
   const controller = mode === "start"
-    ? await createTaskController({ spec: JSON.parse(await readFile(argument, "utf8")), config, dataDirectory: join(root, "state"), services: taskServices, testHooks: hooks })
-    : await openTaskController({ taskId: argument, config, dataDirectory: join(root, "state"), services: taskServices, testHooks: hooks });
+    ? await createTaskController({ spec: JSON.parse(await readFile(argument, "utf8")), config, dataDirectory: join(root, "state"), services: taskServices, testHooks: hooks, ...(gateway ? { gateway } : {}) })
+    : await openTaskController({ taskId: argument, config, dataDirectory: join(root, "state"), services: taskServices, testHooks: hooks, ...(gateway ? { gateway } : {}) });
   process.send?.({ type: "task", id: controller.id });
   controller.subscribe(event => process.stdout.write(JSON.stringify(event) + "\n"));
   try { const result = await (mode === "start" ? controller.start() : controller.resume()); process.send?.({ type: "result", state: result }); }

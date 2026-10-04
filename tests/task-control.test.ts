@@ -58,6 +58,24 @@ test("cancel at final barrier wins over success and terminal resume starts no mo
   assert.ok((await controller.resume()).status === "cancelled" && gateway.requests.length === requests, "取消任务不得自动续跑");
 });
 
+test("a missing unresolved write target stays recoverable until the original content is restored", async context => {
+  const f = await fixture(context); const spec = await valueFixture(f.root, f.cwd);
+  const file = join(f.cwd, "lib/value.mts"); const content = "export function value(){return 42}\n";
+  const gateway = new FakeGateway((_request, _signal, index) => index === 0
+    ? assistant("", [{ id: "unfinished-write", name: "write", arguments: { path: "lib/value.mts", content } }]) : assistant());
+  let controller = await createTaskController({ spec, config, gateway, dataDirectory: f.dataDirectory,
+    testHooks: { barrier: async name => { if (name === "tool_effect_completed:write") throw new Error("test_interrupted_before_result"); } } });
+  f.cleanupAfter(() => controller.close());
+  await controller.start(); const id = controller.id; await controller.close(); await unlink(file);
+  controller = await openTaskController({ taskId: id, config, gateway, dataDirectory: f.dataDirectory });
+  const before = gateway.requests.length; const blocked = await controller.resume(); await controller.close();
+  assert.ok(blocked.status === "blocked" && blocked.reason?.includes("effect_unknown") && gateway.requests.length === before,
+    "缺失文件只意味着无法核查，不能终止任务或请求模型猜测副作用");
+  await writeFile(file, content); controller = await openTaskController({ taskId: id, config, gateway, dataDirectory: f.dataDirectory });
+  assert.ok((await controller.resume()).status === "succeeded" && gateway.requests.length === before,
+    "恢复原文件后同任务直接重验成功，不重放原写操作");
+});
+
 test("v2 corruption cannot be repaired as a partial tail; legacy active task remains preserved and blocked", async context => {
   const f = await fixture(context); const spec = await valueFixture(f.root, f.cwd); const gateway = new FakeGateway(() => assistant());
   const c = await createTaskController({ spec, config, gateway, dataDirectory: f.dataDirectory }); const id = c.id; await c.close();
