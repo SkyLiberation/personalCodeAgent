@@ -1,0 +1,15 @@
+export { createAgentSession, AgentSession, type SessionOptions } from "./harness/session.js";
+export { PiModelGateway } from "./model/pi-gateway.js";
+export { AgentRuntime } from "./runtime/agent.js";
+export { LocalEnvironment } from "./environment/local.js";
+export { ToolExecutor } from "./tools/executor.js";
+export { createCodingTools } from "./tools/coding-tools.js";
+export { SessionRepository } from "./storage/session.js";
+export { loadConfig, type AgentConfig } from "./config.js";
+export type * from "./contracts.js";
+export { createTaskController, openTaskController, TaskController, defaultTaskDirectory, type TaskOptions, type OpenTaskOptions, type TaskServices } from "./harness/task-controller.js";
+export { sendTaskCommand, readTaskCommandResult } from "./storage/task-commands.js";
+export type { ToolIntent } from "./storage/session.js";
+export type { ToolRecoveryAdapter, RecoveryObservation } from "./harness/recovery.js";
+export { TaskRepository } from "./storage/task.js";
+export type * from "./task-contracts.js";

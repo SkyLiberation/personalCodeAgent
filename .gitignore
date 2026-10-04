@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.codeagent/
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
