@@ -9,6 +9,7 @@ function define<T extends TSchema>(options: {
   parameters: T;
   effect: AgentTool["effect"];
   replay: AgentTool["replay"];
+  parallelSafe?: boolean;
   execute(args: Static<T>, context: ToolContext): Promise<ToolResult>;
 }): AgentTool {
   return {
@@ -25,7 +26,7 @@ function define<T extends TSchema>(options: {
 export function createCodingTools(environment: LocalEnvironment): AgentTool[] {
   return [
     define({
-      name: "read", effect: "read", replay: "safe",
+      name: "read", effect: "read", replay: "safe", parallelSafe: true,
       description: "Read a UTF-8 text file with line numbers, or list directory entries. Paths are relative to the workspace. Read before editing. Local secret files and Agent private data are inaccessible.",
       parameters: Type.Object({
         path: Type.String({ minLength: 1 }),
@@ -63,7 +64,7 @@ export function createCodingTools(environment: LocalEnvironment): AgentTool[] {
       description: `Execute a command in the workspace. Default shell: ${environment.shell}. Use it for search, builds and tests. A nonzero exit is an error result. This runs with the host user's permissions.`,
       parameters: Type.Object({
         command: Type.String({ minLength: 1, maxLength: 20_000 }),
-        shell: Type.Optional(Type.Union([Type.Literal("powershell"), Type.Literal("bash")])),
+        shell: Type.Optional(Type.Literal("bash")),
       }, { additionalProperties: false }),
       execute: async (args, context) => {
         await context.reportProgress("正在执行命令…");

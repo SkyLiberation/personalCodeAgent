@@ -3,14 +3,14 @@ import assert from "node:assert/strict";
 import { writeFile, readFile, appendFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { createTaskController, openTaskController, sendTaskCommand, readTaskCommandResult, TaskRepository, SessionRepository } from "../src/index.js";
-import { WindowsHost } from "../src/platform/windows.js";
+import { createExecutionHost } from "../src/platform/host.js";
 import { digest } from "../src/storage/journal.js";
 import { valueFixture } from "./e2e/value-fixture.js";
 import { assistant, config, FakeGateway, fixture } from "./helpers.js";
 import type { FileHandle } from "node:fs/promises";
 
 test("input identity rejects conflicting content; complete facts survive missing snapshot and partial tail", async context => {
-  const f = await fixture(context); const host = await WindowsHost.create();
+  const f = await fixture(context); const host = await createExecutionHost();
   const options = { directory: f.dataDirectory, cwd: f.cwd, sessionId: "input-contract", host };
   let repo = await SessionRepository.open(options);
   f.cleanupAfter(async () => { await repo.close(); await host.close(); });
@@ -83,7 +83,7 @@ test("v2 corruption cannot be repaired as a partial tail; legacy active task rem
   await writeFile(path, original.replace('"pending"', '"succeeded"'));
   await assert.rejects(openTaskController({ taskId: id, dataDirectory: f.dataDirectory, config, gateway }), /checksum/);
   assert.equal(await readFile(path, "utf8"), original.replace('"pending"', '"succeeded"'), "损坏日志不得截断后继续");
-  const legacy = JSON.parse(original.trim()); delete legacy.checksum; delete legacy.previousHash; legacy.state.schemaVersion = 1; legacy.state.status = "running";
+  const legacy = JSON.parse(original.trim().split("\n")[0]!); delete legacy.checksum; delete legacy.previousHash; legacy.state.schemaVersion = 1; legacy.state.status = "running";
   await writeFile(path, JSON.stringify(legacy) + "\n");
   assert.equal((await TaskRepository.read(f.dataDirectory, id)).schemaVersion, 1);
   await assert.rejects(openTaskController({ taskId: id, dataDirectory: f.dataDirectory, config, gateway }), /migration_handoff_ambiguous/);

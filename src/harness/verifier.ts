@@ -5,7 +5,7 @@ import { LocalEnvironment, isPrivatePath } from "../environment/local.js";
 import { errorText, SecretRedactor, throwIfAborted } from "../security.js";
 import type { TaskRepository } from "../storage/task.js";
 import type { TaskDefinition, VerificationEvidence, VerificationSpec } from "../task-contracts.js";
-import type { WindowsHost } from "../platform/windows.js";
+import type { ExecutionHost } from "../platform/host.js";
 
 export function hash(value: string | Buffer): string { return createHash("sha256").update(value).digest("hex"); }
 
@@ -53,7 +53,7 @@ function parseReport(stdout: string): CheckReport {
 }
 
 export class Verifier {
-  constructor(private readonly repository: TaskRepository, private readonly redactor: SecretRedactor, private readonly host?: WindowsHost) {}
+  constructor(private readonly repository: TaskRepository, private readonly redactor: SecretRedactor, private readonly host?: ExecutionHost) {}
 
   async verify(spec: VerificationSpec, signal: AbortSignal, sessionCursor: string | null): Promise<VerificationEvidence> {
     throwIfAborted(signal);

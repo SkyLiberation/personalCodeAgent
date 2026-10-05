@@ -19,6 +19,7 @@ pnpm dev task status <task-id>
   --cwd <directory>    工具工作区，默认当前目录
   --session <id>       恢复一个已有会话
   --data-dir <path>    会话存储目录，默认 .codeagent/sessions
+  --durable-inbox       持久输入队列与内核会话锁（新 v2 会话）
   --readonly           仅允许读取工具
   --no-shell           禁用命令执行
   --max-turns <number> 最大模型轮次，默认 20
@@ -36,6 +37,7 @@ async function main(): Promise<void> {
     options: {
       prompt: { type: "string", short: "p" }, cwd: { type: "string" }, session: { type: "string" },
       "data-dir": { type: "string" },
+      "durable-inbox": { type: "boolean" },
       readonly: { type: "boolean" }, "no-shell": { type: "boolean" }, "max-turns": { type: "string" },
       json: { type: "boolean" }, help: { type: "boolean", short: "h" },
     },
@@ -51,6 +53,7 @@ async function main(): Promise<void> {
     config, ...(values.cwd ? { cwd: values.cwd } : {}), ...(values.session ? { sessionId: values.session } : {}),
     ...(values["data-dir"] ? { dataDirectory: values["data-dir"] } : {}),
     readonly: values.readonly ?? false, noShell: values["no-shell"] ?? false,
+    durableInbox: values["durable-inbox"] ?? false,
   });
   const note = (text: string) => process.stderr.write(text + "\n");
   if (!values.json) note(`MiMo ${config.modelId}\n会话：${session.id}\n工作区：${session.repository.cwd}`);

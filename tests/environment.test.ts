@@ -26,7 +26,7 @@ test("ambiguous edits leave the file unchanged", async (t) => {
   assert.equal(await readFile(join(f.cwd, "file.txt"), "utf8"), "same same");
 });
 
-test("traversal, secret files and outside junctions are rejected", async (t) => {
+test("traversal, secret files and outside symlinks are rejected", async (t) => {
   const f = await fixture(t);
   const environment = await LocalEnvironment.create(f.cwd);
   const outside = join(f.root, "outside");
@@ -36,7 +36,7 @@ test("traversal, secret files and outside junctions are rejected", async (t) => 
   await assert.rejects(environment.write("../outside/file", "bad", signal), /工作区/);
   await assert.rejects(environment.read(".env", 1, 10, signal), /密钥/);
   await assert.rejects(environment.write(".codeagent/state", "bad", signal), /私有/);
-  await symlink(outside, join(f.cwd, "link"), process.platform === "win32" ? "junction" : "dir");
+  await symlink(outside, join(f.cwd, "link"), "dir");
   await assert.rejects(environment.write("link/new/file.txt", "bad", signal), /工作区/);
 });
 
@@ -73,4 +73,23 @@ test("streaming redaction detects a secret split across chunks", () => {
   const stream = redactor.stream();
   const text = stream.write("before sec") + stream.write("ret-token-") + stream.write("value after") + stream.end();
   assert.equal(text, "before [REDACTED] after");
+});
+
+test("removed shell contract refuses execution before any workspace effect", async (t) => {
+  const f = await fixture(t); const environment = await LocalEnvironment.create(f.cwd);
+  const signal = new AbortController().signal;
+  await assert.rejects(environment.run("touch rejected-shell-marker", "powershell" as "bash", signal), /unsupported_shell/);
+  await assert.rejects(readFile(join(f.cwd, "rejected-shell-marker")), { code: "ENOENT" });
+});
+
+test("unsupported platforms reject local execution and ownership before opening resources", async () => {
+  const { createExecutionHost } = await import("../src/platform/host.js");
+  const { McpClient } = await import("../src/tools/mcp.js");
+  const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { ...original, value: "win32" });
+  try {
+    await assert.rejects(LocalEnvironment.create(process.cwd()), /unsupported_platform/);
+    await assert.rejects(createExecutionHost(), /unsupported_platform/);
+    await assert.rejects(McpClient.connect({ command: process.execPath, cwd: process.cwd() }), /unsupported_platform/);
+  } finally { Object.defineProperty(process, "platform", original); }
 });

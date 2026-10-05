@@ -40,6 +40,7 @@ export interface ToolDescriptor {
 export interface ModelRequest {
   messages: readonly ModelMessage[];
   tools: readonly ToolDescriptor[];
+  purpose?: "execution" | "summary" | "replan" | "retry";
 }
 
 export type ModelEvent =
@@ -48,6 +49,7 @@ export type ModelEvent =
   | { type: "done"; message: AssistantMessage; usage?: Usage };
 
 export interface ModelGateway {
+  // One stream is one provider attempt; retries must re-enter request admission.
   stream(request: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent>;
 }
 
@@ -67,14 +69,17 @@ export interface ToolContext {
 }
 
 export interface AgentTool extends ToolDescriptor {
+  parallelSafe?: boolean;
   version?: string;
   effect: "read" | "write" | "process";
   replay: "safe" | "never";
   validate(input: unknown): unknown;
   execute(args: unknown, context: ToolContext): Promise<ToolResult>;
 }
+export type ToolPolicyDecision = { action: "allow" } | { action: "deny" | "confirm"; reason: string };
+export interface ToolPolicyContext { tool: ToolDescriptor & { effect: AgentTool["effect"]; replay: AgentTool["replay"] }; arguments: unknown; callId: string; signal: AbortSignal }
 
-export type RunStatus = "completed" | "aborted" | "failed" | "budget_exhausted";
+export type RunStatus = "completed" | "yielded" | "aborted" | "failed" | "budget_exhausted";
 
 export type AgentEventData =
   | { type: "run_started" }
@@ -99,4 +104,5 @@ export interface RunResult {
   text: string;
   turns: number;
   error?: string;
+  reason?: "turn_limit" | "verification_ready" | "context_capacity_exceeded" | "model_budget";
 }

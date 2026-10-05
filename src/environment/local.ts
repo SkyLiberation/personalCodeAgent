@@ -4,7 +4,7 @@ import { mkdir, open, readFile, readdir, realpath, rename, stat, unlink } from "
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { abortError, throwIfAborted } from "../security.js";
-import type { WindowsHost } from "../platform/windows.js";
+import { assertLinuxPlatform, type ExecutionHost } from "../platform/host.js";
 
 const mutationQueues = new Map<string, Promise<void>>();
 
@@ -29,11 +29,12 @@ export function isPrivatePath(path: string): boolean {
 }
 
 export class LocalEnvironment {
-  readonly shell = process.platform === "win32" ? "powershell" : "bash";
+  readonly shell = "bash" as const;
 
-  private constructor(readonly cwd: string, private readonly timeoutMs: number, private readonly host?: WindowsHost, private writablePaths?: readonly string[]) {}
+  private constructor(readonly cwd: string, private readonly timeoutMs: number, private readonly host?: ExecutionHost, private writablePaths?: readonly string[]) {}
 
-  static async create(cwd: string, timeoutMs = 60_000, host?: WindowsHost, writablePaths?: readonly string[]): Promise<LocalEnvironment> {
+  static async create(cwd: string, timeoutMs = 60_000, host?: ExecutionHost, writablePaths?: readonly string[]): Promise<LocalEnvironment> {
+    assertLinuxPlatform();
     const root = await realpath(resolve(cwd));
     if (!(await stat(root)).isDirectory()) throw new Error("工作区必须是目录");
     return new LocalEnvironment(root, timeoutMs, host, writablePaths);
@@ -50,7 +51,7 @@ export class LocalEnvironment {
   async path(input: string): Promise<string> {
     const target = resolve(this.cwd, input);
     this.inside(target);
-    // Resolve the nearest existing ancestor, including directory symlinks/junctions.
+    // Resolve the nearest existing ancestor, including directory symlinks.
     let ancestor = target;
     const suffix: string[] = [];
     for (;;) {
@@ -139,16 +140,12 @@ export class LocalEnvironment {
 
   setWritablePaths(paths: readonly string[]): void { this.writablePaths = paths; }
 
-  async run(command: string, shell: "powershell" | "bash", signal: AbortSignal): Promise<{
+  async run(command: string, shell: "bash", signal: AbortSignal): Promise<{
     output: string; exitCode: number; timedOut: boolean;
   }> {
     throwIfAborted(signal);
-    const executable = shell === "powershell" ? (process.platform === "win32" ? "powershell.exe" : "pwsh") : "bash";
-    const args = shell === "powershell"
-      ? ["-NoProfile", "-NonInteractive", "-Command",
-        `[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); $OutputEncoding = [Console]::OutputEncoding; ${command}\n$codeAgentSucceeded = $?; if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; if (-not $codeAgentSucceeded) { exit 1 }`]
-      : ["--noprofile", "--norc", "-c", command];
-    return this.exec(executable, args, signal);
+    if (shell !== "bash") throw new Error("unsupported_shell: Bash required");
+    return this.exec("bash", ["--noprofile", "--norc", "-c", command], signal);
   }
 
   async exec(executable: string, args: readonly string[], signal: AbortSignal): Promise<{
@@ -163,7 +160,7 @@ export class LocalEnvironment {
     }
     return new Promise((resolveRun, rejectRun) => {
       const child = spawn(executable, args, {
-        cwd: this.cwd, env, windowsHide: true, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"],
+        cwd: this.cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"],
       });
       let output = "";
       let stdout = "";
@@ -186,14 +183,7 @@ export class LocalEnvironment {
       const kill = () => {
         if (killing || !child.pid) return;
         killing = true;
-        if (process.platform === "win32") {
-          const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
-            windowsHide: true, stdio: "ignore",
-          });
-          killer.on("error", () => child.kill());
-        } else {
-          try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
-        }
+        try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
       };
       const timer = setTimeout(() => { timedOut = true; kill(); }, this.timeoutMs);
       timer.unref();

@@ -3,7 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { TaskState } from "../../src/task-contracts.js";
 export function phase2Worker(root: string, mode: string, arg: string, barrier = "") {
-  const child = fork(new URL("./phase2-worker.ts", import.meta.url), [mode, root, arg, barrier], { execArgv: ["--import", "tsx"], windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+  const child = fork(new URL("./phase2-worker.ts", import.meta.url), [mode, root, arg, barrier], { execArgv: ["--import", "tsx"], stdio: ["ignore", "pipe", "pipe", "ipc"] });
   const mailbox: Record<string, unknown>[] = []; let wake: (() => void) | undefined;
   let output = "", errors = ""; child.stdout?.setEncoding("utf8").on("data", d => output += d); child.stderr?.setEncoding("utf8").on("data", d => errors += d);
   child.on("message", message => { mailbox.push(message as Record<string, unknown>); wake?.(); }); child.on("exit", () => wake?.());

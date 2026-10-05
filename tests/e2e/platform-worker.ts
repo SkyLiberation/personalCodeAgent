@@ -1,7 +1,8 @@
-import { WindowsHost } from "../../src/platform/windows.js";
-const host = await WindowsHost.create();
+import { createExecutionHost } from "../../src/platform/host.js";
+const host = await createExecutionHost();
 try {
   const lease = await host.acquire(process.argv[2]!);
+  if (process.argv[3]) await host.restoreProcessGroups(process.argv[3]);
   process.send?.({ type: "owned" });
   process.on("message", async (message: { type: string; file?: string }) => {
     if (message.type === "run") {

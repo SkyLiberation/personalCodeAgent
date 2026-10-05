@@ -100,7 +100,7 @@ export class PiModelGateway implements ModelGateway {
         timestamp: message.timestamp,
         providerData: { adapter: "pi-ai", message },
       },
-      usage: { inputTokens: message.usage.input, outputTokens: message.usage.output },
+      usage: { inputTokens: message.usage.input + message.usage.cacheRead + message.usage.cacheWrite, outputTokens: message.usage.output },
     };
   }
 }

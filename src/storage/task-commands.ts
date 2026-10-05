@@ -1,14 +1,14 @@
 import { mkdir, open, readFile, readdir, link, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { WindowsHost } from "../platform/windows.js";
+import { createExecutionHost, type ExecutionHost } from "../platform/host.js";
 import type { TaskCommand, CommandResult } from "../task-contracts.js";
 import { validateTaskDefinition } from "../task-contracts.js";
 import { digest } from "./journal.js";
 import { TaskRepository, taskPath } from "./task.js";
 export interface CommandEnvelope { command: TaskCommand; taskId: string; contentHash: string; seq: number }
 export const terminalTask = (status: string): boolean => ["succeeded", "cancelled", "failed"].includes(status);
-export async function controlLock<T>(directory: string, host: WindowsHost, action: () => Promise<T>): Promise<T> {
+export async function controlLock<T>(directory: string, host: ExecutionHost, action: () => Promise<T>): Promise<T> {
   let lease; const deadline = Date.now() + 10_000;
   for (;;) { try { lease = await host.acquire(join(directory, "control.lease")); break; } catch (error) { if (!String(error).includes("busy") || Date.now() >= deadline) throw error; await new Promise(r => setTimeout(r, 20)); } }
   try { return await action(); } finally { await lease.close(); }
@@ -26,9 +26,10 @@ export async function pendingCommands(directory: string): Promise<CommandEnvelop
 }
 export async function sendTaskCommand(options: { taskId: string; dataDirectory: string; command: TaskCommand }): Promise<CommandResult> {
   const { command } = options;
-  if (!/^[a-zA-Z0-9_-]{1,100}$/.test(command.id) || !["pause", "cancel", "update"].includes(command.type)) throw new Error("command ID/type 不合法");
+  if (!/^[a-zA-Z0-9_-]{1,100}$/.test(command.id) || !["pause", "cancel", "update", "adjust_budget"].includes(command.type)) throw new Error("command ID/type 不合法");
+  if (command.type === "adjust_budget" && (!command.reason?.trim() || !Number.isSafeInteger(command.expectedVersion) || command.expectedVersion < 1)) throw new Error("budget_adjustment_invalid");
   if (command.type === "update") { command.spec = validateTaskDefinition(command.spec); if (!Number.isSafeInteger(command.expectedVersion) || command.expectedVersion < 1) throw new Error("expectedVersion 不合法"); }
-  const host = await WindowsHost.create(); const directory = taskPath(options.dataDirectory, options.taskId);
+  const host = await createExecutionHost(); const directory = taskPath(options.dataDirectory, options.taskId);
   try { return await controlLock(directory, host, async () => {
     const state = await TaskRepository.read(options.dataDirectory, options.taskId); const contentHash = digest(command);
     const previous = (await pendingCommands(directory)).find(item => item.command.id === command.id);

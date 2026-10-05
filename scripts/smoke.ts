@@ -32,7 +32,7 @@ try {
   assert.ok(called.includes("edit") || called.includes("write"), "没有实际修改代码");
   assert.ok(called.includes("shell"), "没有执行测试命令");
   const exitCode = await new Promise<number>((resolve, reject) => {
-    const child = spawn(process.execPath, ["--test", "math.test.mjs"], { cwd: directory, stdio: "pipe", windowsHide: true });
+    const child = spawn(process.execPath, ["--test", "math.test.mjs"], { cwd: directory, stdio: "pipe" });
     child.on("error", reject);
     child.on("close", (code) => resolve(code ?? -1));
   });

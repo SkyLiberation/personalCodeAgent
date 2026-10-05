@@ -1,37 +1,41 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { fork } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { WindowsHost } from "../../src/platform/windows.js";
+import { createTaskController, openTaskController, PiModelGateway, loadConfig } from "../../src/index.js";
+import type { ModelGateway } from "../../src/contracts.js";
+import { seal } from "../../src/storage/journal.js";
+import { valueFixture } from "./value-fixture.js";
+import { scenario, saveSuiteReport } from "./helpers.js";
+after(saveSuiteReport);
 
-test("LT-08B/C: OS lease survives stale metadata; host crash kills real parent and child", { skip: process.platform !== "win32", timeout: 60_000 }, async () => {
-  const directory = await mkdtemp(join(process.cwd(), ".codeagent", "platform-"));
-  const path = join(directory, "owner.lease");
-  const worker = fork(new URL("./platform-worker.ts", import.meta.url), [path], { execArgv: ["--import", "tsx"], windowsHide: true, stdio: ["ignore", "ignore", "pipe", "ipc"] });
-  const first = await new Promise<{ type: string }>((resolve, reject) => { worker.once("message", resolve); worker.once("error", reject); });
-  assert.equal(first.type, "owned", "真实执行者持有内核锁");
-  const host = await WindowsHost.create();
-  worker.on("message", message => { if ((message as { type: string }).type === "run_error") console.error(message); });
-  try {
-    await writeFile(join(directory, "metadata.json"), '{"timestamp":0}');
-    await assert.rejects(host.acquire(path), /busy/, "元数据过期不能夺取存活执行权");
-    const file = join(directory, "pids.json");
-    worker.send({ type: "run", file });
-    let pids: { parent: number; child: number } | undefined;
-    const deadline = Date.now() + 10_000;
-    while (!pids && Date.now() < deadline) { pids = await readFile(file, "utf8").then(JSON.parse).catch(() => undefined); if (!pids) await new Promise(r => setTimeout(r, 50)); }
-    assert.ok(pids, "工具真实父子进程已启动");
-    worker.kill();
-    await new Promise<void>(resolve => worker.once("exit", () => resolve()));
-    let lease;
-    while (!lease && Date.now() < deadline) { lease = await host.acquire(path).catch(() => undefined); if (!lease) await new Promise(r => setTimeout(r, 50)); }
-    assert.ok(lease, "崩溃清理后自动取得同一内核锁");
-    const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
-    assert.equal(alive(pids.parent) || alive(pids.child), false, "取得执行权之前旧进程组已停止");
-    await lease.close();
-    await writeFile(join(directory, "evidence.json"), JSON.stringify({ status: "passed", scenario: "LT-08B/C kernel lease and crash cleanup", parent: pids.parent, child: pids.child, groupsStopped: true, recoveredLease: true }, null, 2));
-    contextDiagnostic(directory);
-  } finally { worker.kill(); await host.close(); }
+test("LX-06: Linux workspace identity is case sensitive; legacy Windows process facts block without killing or conversion", { timeout: 30_000 }, async context => {
+  await scenario(context, "linux-only-migration", async ({ root, cwd }) => {
+    const config = loadConfig(); const pi = new PiModelGateway(config); let requests = 0;
+    const gateway: ModelGateway = { stream(request, signal) { requests++; return pi.stream(request, signal); } };
+    const firstRoot = join(cwd, "Project"); const secondRoot = join(cwd, "project");
+    await mkdir(firstRoot); await mkdir(secondRoot);
+    const firstSpec = await valueFixture(join(root, "first-control"), firstRoot); const secondSpec = await valueFixture(join(root, "second-control"), secondRoot);
+    const dataDirectory = join(root, "state");
+    let first = await createTaskController({ spec: firstSpec, config, gateway, dataDirectory });
+    context.after(() => first.close());
+    const second = await createTaskController({ spec: secondSpec, config, gateway, dataDirectory });
+    context.after(() => second.close());
+    await assert.rejects(createTaskController({ spec: firstSpec, config, gateway, dataDirectory }), /busy/, "同一工作区拒绝第二个执行者；大小写不同的目录可独立持有执行权");
+    const id = first.id; const journal = join(first.repository.directory, "process-groups.jsonl");
+    await first.close();
+    const sentinel = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore" });
+    await new Promise<void>((resolve, reject) => { sentinel.once("spawn", resolve); sentinel.once("error", reject); });
+    context.after(async () => { const stopped = new Promise<void>(resolve => sentinel.once("close", () => resolve())); sentinel.kill("SIGKILL"); await stopped; });
+    const legacy = JSON.stringify(seal({ schemaVersion: 1, backend: "windows", jobName: "old-job", ownerId: "old-owner", pid: sentinel.pid }, "")) + "\n";
+    await writeFile(journal, legacy);
+    await assert.rejects(openTaskController({ taskId: id, config, gateway, dataDirectory }), /process_state_unknown/);
+    assert.doesNotThrow(() => process.kill(sentinel.pid!, 0), "旧 Windows PID 不应导致清理无关 Linux 进程");
+    assert.equal(await readFile(journal, "utf8"), legacy, "拒绝旧身份时不能转换或重写原日志");
+    assert.ok(requests === 0 && (await readFile(join(firstRoot, "lib/value.mts"), "utf8")).includes("return 0"), "拒绝发生在模型请求和交付写入之前");
+    await writeFile(journal, "");
+    first = await openTaskController({ taskId: id, config, gateway, dataDirectory });
+    await writeFile(join(root, "evidence.json"), JSON.stringify({ status: "passed", platform: process.platform, caseSensitiveOwnership: true, legacyIdentityRejected: true, requests, sentinelAlive: true, linuxReopened: true }, null, 2));
+  });
 });
-function contextDiagnostic(directory: string): void { console.log(`Platform evidence: ${join(directory, "evidence.json")}`); }

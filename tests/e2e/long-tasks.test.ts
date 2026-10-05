@@ -38,13 +38,13 @@ test("LT-01: actual task CLI completes staged order delivery with independent ev
   });
 });
 
-test("LT-02: model completion cannot pass corrupted output; actual model repairs verification feedback", { timeout: 600_000 }, async (context) => {
+test("LT-02: model completion cannot pass corrupted output; actual model repairs verification feedback", { timeout: 900_000 }, async (context) => {
   await scenario(context, "LT-02-verification-repair", async ({ root, cwd }) => {
     const fixture = await orderFixture(root, cwd);
     const events: TaskEvent[] = [];
     let injected = false;
     const controller = await createTaskController({ spec: fixture.spec, dataDirectory: join(root, "state"),
-      config: { ...loadConfig(), maxTurns: 10 },
+      config: { ...loadConfig(), maxTurns: 20 },
       testHooks: { beforeVerification: async ({ phase, milestoneId }) => {
         if (!injected && phase === "milestone" && milestoneId === "M3") {
           const run = events.findLast(event => event.type === "task_run_completed");

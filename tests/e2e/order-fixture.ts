@@ -62,7 +62,7 @@ if (stage === 'parse') {
   });
 } else if (stage === 'cli') {
   await check('real CLI produces correct JSON', () => {
-    const result = spawnSync(process.execPath, [join(root, 'src/cli.mts'), '--input', 'data/orders.csv', '--discount-bps', '1000', '--output', 'out/summary.json'], { cwd: root, encoding: 'utf8', timeout: 15000, windowsHide: true });
+    const result = spawnSync(process.execPath, [join(root, 'src/cli.mts'), '--input', 'data/orders.csv', '--discount-bps', '1000', '--output', 'out/summary.json'], { cwd: root, encoding: 'utf8', timeout: 15000 });
     assert.equal(result.status, 0, result.stderr);
     checkTotals(JSON.parse(readFileSync(join(root, 'out/summary.json'), 'utf8')).orders);
   });
@@ -71,7 +71,7 @@ if (stage === 'parse') {
     const input = join(root, 'out/invalid-input.csv'), output = join(root, 'out/invalid-output.json');
     if (existsSync(output)) rmSync(output);
     writeFileSync(input, 'order_id,sku,quantity,unit_price\\nA,B,0,1.00\\n');
-    const result = spawnSync(process.execPath, [join(root, 'src/cli.mts'), '--input', input, '--discount-bps', '1000', '--output', output], { cwd: root, encoding: 'utf8', timeout: 15000, windowsHide: true });
+    const result = spawnSync(process.execPath, [join(root, 'src/cli.mts'), '--input', input, '--discount-bps', '1000', '--output', output], { cwd: root, encoding: 'utf8', timeout: 15000 });
     assert.ok(result.status !== 0 && !existsSync(output), 'invalid order must not be delivered successfully');
   });
 } else { throw new Error('unknown stage'); }

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createTaskController, openTaskController, TaskRepository, PiModelGateway, loadConfig, sendTaskCommand } from "../../src/index.js";
 import type { ModelGateway } from "../../src/contracts.js";
 import type { TaskEvent } from "../../src/task-contracts.js";
-import { WindowsHost } from "../../src/platform/windows.js";
+import { LinuxHost } from "../../src/platform/linux.js";
 import { valueFixture } from "./value-fixture.js";
 import { phase2Worker, phase2Resume } from "./phase2-helpers.js";
 import { scenario, saveSuiteReport } from "./helpers.js";
@@ -23,7 +23,7 @@ test("LT-04F: current file digest mismatch blocks further model work until obser
 });
 test("LT-09: missing verifier blocks actual completed code; explicit contract repair resumes without quota reset", { timeout: 300_000 }, async context => {
   await scenario(context, "phase2-verifier-unavailable", async ({ root, cwd }) => {
-    const spec = await valueFixture(root, cwd); const valid = structuredClone(spec); spec.verifiers[0]!.command = join(root, "missing-verifier.exe");
+    const spec = await valueFixture(root, cwd); const valid = structuredClone(spec); spec.verifiers[0]!.command = join(root, "missing-verifier");
     const config = loadConfig(); let c = await createTaskController({ spec, config, dataDirectory: join(root, "state") }); context.after(() => c.close());
     const events: TaskEvent[] = []; c.subscribe(event => events.push(event));
     const blocked = await c.start(); const id = c.id; await c.close();
@@ -48,12 +48,12 @@ for (const target of ["task", "session"] as const) test(`LT-09: actual closed ${
     await writeFile(join(root, "result-evidence.json"), JSON.stringify({ modelId: config.modelId, baseUrl: config.baseUrl, requests, taskId: c.id, durableStatus: state.status, fault: `closed_${target}_journal` }, null, 2));
   });
 });
-test("LT-08C: missing native compiler refuses execution without a weaker lock fallback", { timeout: 30_000 }, async context => {
+test("LT-08C: missing platform runtime refuses execution without a weaker lock fallback", { timeout: 30_000 }, async context => {
   await scenario(context, "phase2-platform-unavailable", async ({ root, cwd }) => {
     const config = loadConfig(); const pi = new PiModelGateway(config); let requests = 0;
     const gateway: ModelGateway = { stream(request, signal) { requests++; return pi.stream(request, signal); } };
     const spec = await valueFixture(root, cwd); let failure = "";
-    try { await createTaskController({ spec, config, gateway, dataDirectory: join(root, "state"), services: { platform: () => WindowsHost.create({ compiler: join(root, "missing-compiler.exe"), cacheDirectory: join(root, "platform-cache") }) } }); }
+    try { await createTaskController({ spec, config, gateway, dataDirectory: join(root, "state"), services: { platform: () => LinuxHost.create({ python: join(root, "missing-python") }) } }); }
     catch (error) { failure = String(error); }
     assert.ok(failure.includes("ENOENT") && requests === 0 && (await readFile(join(cwd, "lib/value.mts"), "utf8")).includes("return 0"), "原生后端缺失时无模型 / 写入动作，不降级抢占");
     await writeFile(join(root, "failure.log"), failure);

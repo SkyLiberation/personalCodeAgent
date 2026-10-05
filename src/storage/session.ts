@@ -1,15 +1,26 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, truncate, unlink, writeFile, type FileHandle } from "node:fs/promises";
-import { join } from "node:path";
-import type { ModelMessage, RunStatus, ToolCall } from "../contracts.js";
+import { mkdir, open, readFile, truncate, unlink, writeFile, lstat, realpath, type FileHandle } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { readGuardedFile } from "./guarded-file.js";
+import { normalizeHistoryPath, type HistoryQuery, type HistoryPage } from "./history.js";
+import type { ModelMessage, RunStatus, RunResult, ToolCall } from "../contracts.js";
 import { SecretRedactor } from "../security.js";
-import type { WindowsHost, ExecutionLease } from "../platform/windows.js";
+import type { ExecutionHost, ExecutionLease } from "../platform/host.js";
 import { digest, journalLines, seal, verifySeal } from "./journal.js";
 
 export interface ToolIntent { operationId: string; assistantEntryId: string; runId: string; call: ToolCall; replay: "safe" | "never"; toolVersion: string; postcondition?: { path: string; sha256: string } }
 
+export interface AttachmentReference { id: string; bytes: number; sha256: string }
+
 type Payload =
-  | { kind: "message"; message: ModelMessage }
+  | { kind: "tool_policy"; callId: string; action: "allow" | "deny" | "confirm"; reason?: string }
+  | { kind: "branch_created"; sourceSessionId: string; sourceCursor: string }
+  | { kind: "context_compacted"; summary: string; firstKeptEntryId: string; sourceCursor: string; sourceHash: string; policyVersion: 1 }
+  | { kind: "inbox_accepted"; inputId: string; runId: string; mode: "follow_up" | "steer"; prompt: string; contentHash: string }
+  | { kind: "inbox_consumed"; inputId: string; runId: string; message: Extract<ModelMessage, { role: "user" | "system" }> }
+  | { kind: "inbox_settled"; inputId: string; result: RunResult }
+  | { kind: "message"; message: ModelMessage; attachment?: AttachmentReference }
   | ({ kind: "tool_intent"; call: ToolCall; replay: "safe" | "never" } & Partial<ToolIntent>)
   | { kind: "input"; inputId: string; runId: string; specVersion: number; contentHash: string; message: Extract<ModelMessage, { role: "system" | "user" }> }
   | { kind: "tool_recovery"; operationId: string; assistantEntryId: string; callId: string; classification: string; result: { text: string; isError: boolean }; evidenceHash: string }
@@ -39,6 +50,7 @@ function validMessage(message: unknown): message is ModelMessage {
 
 export class SessionRepository {
   private entries: SessionEntry[] = [];
+  private readonly issuedAttachments = new Map<string, AttachmentReference>();
   private handle!: FileHandle;
   private lock!: FileHandle;
   private lease: ExecutionLease | undefined;
@@ -55,7 +67,7 @@ export class SessionRepository {
   ) {}
 
   static async open(options: {
-    directory: string; cwd: string; sessionId?: string; redactor?: SecretRedactor; host?: WindowsHost; logPath?: string;
+    directory: string; cwd: string; sessionId?: string; redactor?: SecretRedactor; host?: ExecutionHost; logPath?: string;
   }): Promise<SessionRepository> {
     const id = options.sessionId ?? randomUUID();
     if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id)) throw new Error("session ID 只能包含字母、数字、下划线和连字符");
@@ -113,12 +125,15 @@ export class SessionRepository {
       }
       if (!entry || typeof entry.id !== "string" || seen.has(entry.id) || typeof entry.timestamp !== "number" ||
           entry.parentId !== (this.entries.at(-1)?.id ?? null) ||
-          !["message", "tool_intent", "run_status", "input", "tool_recovery"].includes(entry.kind) ||
+          !["message", "tool_intent", "run_status", "input", "tool_recovery", "context_compacted", "inbox_accepted", "inbox_consumed", "inbox_settled", "branch_created", "tool_policy"].includes(entry.kind) ||
           ((entry.kind === "message" || entry.kind === "input") && !validMessage(entry.message))) {
         throw new Error(`会话第 ${index + 1} 行结构不合法`);
       }
       if (entry.kind === "input" && (entry.message.role !== "user" || entry.contentHash !== digest(entry.message.text) || !entry.inputId || !entry.runId || !Number.isSafeInteger(entry.specVersion) || entry.specVersion < 1 || this.entries.some(e => e.kind === "input" && e.inputId === entry.inputId))) throw new Error("input_record_invalid");
-      if (entry.kind === "run_status" && (!entry.runId || !["running", "interrupted", "completed", "aborted", "failed", "budget_exhausted"].includes(entry.status))) throw new Error("run_record_invalid");
+      if (entry.kind === "run_status" && (!entry.runId || !["running", "interrupted", "completed", "yielded", "aborted", "failed", "budget_exhausted"].includes(entry.status))) throw new Error("run_record_invalid");
+      if (entry.kind === "inbox_accepted" && (!entry.inputId || !entry.runId || !["follow_up", "steer"].includes(entry.mode) || entry.contentHash !== digest(entry.prompt) || this.entries.some(e => e.kind === "inbox_accepted" && e.inputId === entry.inputId))) throw new Error("inbox_record_invalid");
+      if (entry.kind === "inbox_consumed" && (!validMessage(entry.message) || entry.message.role !== "user" || !this.entries.some(e => e.kind === "inbox_accepted" && e.inputId === entry.inputId && e.prompt === entry.message.text) || this.entries.some(e => e.kind === "inbox_consumed" && e.inputId === entry.inputId))) throw new Error("inbox_consumption_invalid");
+      if (entry.kind === "context_compacted" && (!entry.summary?.trim() || entry.policyVersion !== 1 || !this.entries.some(e => e.id === entry.firstKeptEntryId) || !this.entries.some(e => e.id === entry.sourceCursor))) throw new Error("context_compaction_invalid");
       if (entry.kind === "tool_intent") {
         if (!entry.call || typeof entry.call.id !== "string" || typeof entry.call.name !== "string" || !["safe", "never"].includes(entry.replay)) throw new Error("tool_intent_invalid");
         if (this.schemaVersion === 2) {
@@ -127,6 +142,7 @@ export class SessionRepository {
         }
       }
       if (entry.kind === "tool_recovery" && (!entry.operationId || !entry.assistantEntryId || !entry.callId || !entry.classification || !entry.result || typeof entry.result.text !== "string" || typeof entry.result.isError !== "boolean" || !entry.evidenceHash)) throw new Error("tool_recovery_invalid");
+      if (entry.kind === "message" && entry.attachment && (entry.message.role !== "tool_result" || !/^[a-f0-9-]{36}\.txt$/.test(entry.attachment.id) || !Number.isSafeInteger(entry.attachment.bytes) || entry.attachment.bytes < 0 || !/^[a-f0-9]{64}$/.test(entry.attachment.sha256))) throw new Error("attachment_reference_invalid");
       seen.add(entry.id);
       if (this.schemaVersion === 2) this.checksum = verifySeal(entry as unknown as Record<string, unknown>, this.checksum);
       this.entries.push(entry);
@@ -140,10 +156,33 @@ export class SessionRepository {
   }
 
   messages(): ModelMessage[] {
-    return this.entries.filter((entry) => entry.kind === "message" || entry.kind === "input").map((entry) => entry.message);
+    return this.entries.flatMap((entry) => entry.kind === "message" || entry.kind === "input" || entry.kind === "inbox_consumed" ? [entry.message] : []);
   }
 
   facts(): SessionEntry[] { return structuredClone(this.entries); }
+
+  acceptInbox(input: { inputId: string; runId: string; mode: "follow_up" | "steer"; prompt: string }): Promise<SessionEntry> {
+    const action = this.inputPending.then(async () => {
+      if (!/^[a-zA-Z0-9_-]{1,100}$/.test(input.inputId) || !input.prompt.trim()) throw new Error("inbox_input_invalid");
+      const prompt = this.redactor.text(input.prompt); const contentHash = digest(prompt);
+      const existing = this.entries.find(e => e.kind === "inbox_accepted" && e.inputId === input.inputId);
+      if (existing?.kind === "inbox_accepted") {
+        if (existing.contentHash !== contentHash || existing.mode !== input.mode) throw new Error("input_id_conflict");
+        return existing;
+      }
+      return this.append({ kind: "inbox_accepted", ...input, prompt, contentHash });
+    }); this.inputPending = action.then(() => undefined, () => undefined); return action;
+  }
+
+  consumeInbox(inputId: string, runId: string): Promise<SessionEntry> {
+    const action = this.inputPending.then(async () => {
+      const existing = this.entries.find(e => e.kind === "inbox_consumed" && e.inputId === inputId);
+      if (existing) return existing;
+      const accepted = this.entries.find(e => e.kind === "inbox_accepted" && e.inputId === inputId);
+      if (accepted?.kind !== "inbox_accepted") throw new Error("inbox_not_accepted");
+      return this.append({ kind: "inbox_consumed", inputId, runId, message: { role: "user", text: accepted.prompt, timestamp: Date.now() } });
+    }); this.inputPending = action.then(() => undefined, () => undefined); return action;
+  }
 
   acceptInputOnce(input: { inputId: string; runId: string; specVersion: number; prompt: string; contentHash: string }): Promise<SessionEntry> {
     const action = this.inputPending.then(async () => {
@@ -175,18 +214,71 @@ export class SessionRepository {
     return write;
   }
 
-  async appendMessage(message: ModelMessage): Promise<ModelMessage> {
-    const entry = await this.append({ kind: "message", message });
+  async appendMessage(input: ModelMessage & { artifactId?: string }): Promise<ModelMessage> {
+    const { artifactId, ...message } = input;
+    const attachment = artifactId ? this.issuedAttachments.get(artifactId) : undefined;
+    if (artifactId && (message.role !== "tool_result" || !attachment)) throw new Error("attachment_not_issued");
+    const entry = await this.append({ kind: "message", message, ...(attachment ? { attachment } : {}) });
     if (entry.kind !== "message") throw new Error("会话写入类型错误");
+    if (artifactId) this.issuedAttachments.delete(artifactId);
     return entry.message;
   }
 
   async artifact(text: string): Promise<string> {
-    const id = randomUUID() + ".txt";
-    const directory = join(this.path.slice(0, -6) + "-artifacts");
+    const id = randomUUID() + ".txt"; const directory = this.artifactDirectory();
     await mkdir(directory, { recursive: true });
-    await writeFile(join(directory, id), this.redactor.text(text), { mode: 0o600 });
+    const content = this.redactor.text(text); const file = await open(join(directory, id), "wx", 0o600);
+    try { await file.writeFile(content); await file.sync(); } finally { await file.close(); }
+    this.issuedAttachments.set(id, { id, bytes: Buffer.byteLength(content), sha256: createHash("sha256").update(content).digest("hex") });
     return id;
+  }
+
+  private artifactDirectory(): string { return this.path.slice(0, -6) + "-artifacts"; }
+
+  async history(query: HistoryQuery, signal: AbortSignal): Promise<HistoryPage> {
+    signal.throwIfAborted();
+    if (!query || typeof query !== "object" || Array.isArray(query) || Object.keys(query).some(key => !("path" in query ? ["path", "start", "count"] : ["entryId", "attachment", "offset", "limit"]).includes(key)) || ("path" in query ? typeof query.path !== "string" : typeof query.entryId !== "string" || (query.attachment !== undefined && typeof query.attachment !== "boolean"))) throw new Error("history_query_invalid");
+    const scope = { sessionId: this.id, authority: "historical-data" as const, cursor: this.cursor };
+    if ("path" in query) {
+      const path = normalizeHistoryPath(query.path); const start = query.start ?? 0; const count = query.count ?? 5;
+      if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(count) || count < 1 || count > 5) throw new Error("history_page_invalid");
+      const calls = new Set<string>();
+      for (const entry of this.entries) {
+        if (entry.kind !== "message" || entry.message.role !== "assistant") continue;
+        for (const call of entry.message.toolCalls) {
+          if (call.name === "history" || !call.arguments || typeof call.arguments !== "object") continue;
+          const input = (call.arguments as { path?: unknown }).path;
+          if (typeof input === "string") { try { if (normalizeHistoryPath(input) === path) calls.add(call.id); } catch { /* No source association for out-of-scope paths. */ } }
+        }
+      }
+      const matches = this.entries.filter(e => e.kind === "message" && e.message.role === "tool_result" && calls.has(e.message.callId));
+      return { ...scope, path, total: matches.length, nextStart: start + count < matches.length ? start + count : null,
+        entries: matches.slice(start, start + count).map(e => {
+          if (e.kind !== "message" || e.message.role !== "tool_result") throw new Error("history_source_invalid");
+          return { entryId: e.id, toolName: e.message.toolName, callId: e.message.callId, preview: this.redactor.text(e.message.text).slice(0, 256), ...(e.attachment ? { attachment: { ...e.attachment } } : {}) };
+        }) };
+    }
+    if (!/^[a-zA-Z0-9_-]{1,100}$/.test(query.entryId)) throw new Error("history_entry_invalid");
+    const offset = query.offset ?? 0; const limit = query.limit ?? 4096;
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 4096) throw new Error("history_page_invalid");
+    const entry = this.entries.find(e => e.id === query.entryId);
+    if (!entry || !["message", "input", "inbox_consumed"].includes(entry.kind) || !("message" in entry)) throw new Error("history_entry_unavailable");
+    let text: string;
+    if (query.attachment) {
+      if (entry.kind !== "message" || !entry.attachment) throw new Error("history_attachment_unavailable");
+      const directory = resolve(this.artifactDirectory());
+      if ((await lstat(directory)).isSymbolicLink() || await realpath(directory) !== directory) throw new Error("history_attachment_path_invalid");
+      const bytes = await readGuardedFile(join(directory, entry.attachment.id), 8 * 1024 * 1024);
+      if (bytes.length !== entry.attachment.bytes || createHash("sha256").update(bytes).digest("hex") !== entry.attachment.sha256) throw new Error("history_attachment_integrity_invalid");
+      text = bytes.toString("utf8");
+    } else {
+      text = entry.message.text;
+      if (entry.message.role === "assistant") text += "\n" + JSON.stringify(entry.message.toolCalls);
+    }
+    signal.throwIfAborted(); text = this.redactor.text(text);
+    if (offset > text.length) throw new Error("history_offset_invalid");
+    return { ...scope, entryId: entry.id, kind: entry.kind, attachment: query.attachment === true, offset, totalChars: text.length,
+      nextOffset: offset + limit < text.length ? offset + limit : null, text: text.slice(offset, offset + limit) };
   }
 
   async close(): Promise<void> {

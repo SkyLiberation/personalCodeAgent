@@ -1,6 +1,6 @@
 import { readFile, open } from "node:fs/promises";
 import { join } from "node:path";
-import { createTaskController, openTaskController, PiModelGateway, loadConfig, type TaskServices } from "../../src/index.js";
+import { createTaskController, openTaskController, PiModelGateway, loadConfig, type TaskServices, type TaskController } from "../../src/index.js";
 import type { ModelGateway } from "../../src/contracts.js";
 const [mode, root, argument, barrier = ""] = process.argv.slice(2) as [string,string,string,string];
 const config = loadConfig();
@@ -10,7 +10,7 @@ async function durable(path: string, content: string, flag: "a" | "wx") {
 const auditModel = await readFile(join(root, "audit-model-enabled"), "utf8").then(() => true, () => false);
 const pi = auditModel ? new PiModelGateway(config) : undefined;
 const gateway: ModelGateway | undefined = pi ? { async *stream(request, signal) {
-  await durable(join(root, "model-requests.jsonl"), JSON.stringify({ pid: process.pid, timestamp: Date.now() }) + "\n", "a");
+  await durable(join(root, "model-requests.jsonl"), JSON.stringify({ pid: process.pid, timestamp: Date.now(), purpose: request.purpose ?? "execution" }) + "\n", "a");
   yield* pi.stream(request, signal);
 } } : undefined;
 const services: TaskServices = {
@@ -33,9 +33,19 @@ if (holdEnabled) services.tools = [{ name: "hold-work", description: "Run the re
   return { text: result.output + "前台等待已完成。", isError: result.exitCode !== 0 };
 } }];
 const taskServices = receiptEnabled || holdEnabled ? services : {};
-const hooks = { barrier: async (name: string) => { if (name === barrier) { process.send?.({ type: "barrier", name }); await new Promise<void>(resolve => process.once("message", () => resolve())); } } };
+let controller: TaskController; let materialAdded = false;
+const hooks = { barrier: async (name: string) => {
+  if (mode === "start" && name === "input_accepted" && !materialAdded) {
+    materialAdded = true; const material = await readFile(join(root, "context-material.txt"), "utf8").catch(() => undefined); if (material) await controller.appendContextMaterial(material);
+  }
+  if (name === barrier) {
+    const label = await readFile(join(root, "context-barrier-label.txt"), "utf8").catch(() => undefined);
+    if (name === "context_compacted" && label && !controller.contextSummary?.includes(label)) return;
+    process.send?.({ type: "barrier", name }); await new Promise<void>(resolve => process.once("message", () => resolve()));
+  }
+} };
 try {
-  const controller = mode === "start"
+  controller = mode === "start"
     ? await createTaskController({ spec: JSON.parse(await readFile(argument, "utf8")), config, dataDirectory: join(root, "state"), services: taskServices, testHooks: hooks, ...(gateway ? { gateway } : {}) })
     : await openTaskController({ taskId: argument, config, dataDirectory: join(root, "state"), services: taskServices, testHooks: hooks, ...(gateway ? { gateway } : {}) });
   process.send?.({ type: "task", id: controller.id });

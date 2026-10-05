@@ -61,7 +61,7 @@ export async function runProcess(args: string[], options: {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, {
       cwd: options.cwd, env,
-      windowsHide: true, detached: process.platform !== "win32", stdio: "pipe",
+      detached: true, stdio: "pipe",
     });
     let stdout = "";
     let stderr = "";
@@ -72,15 +72,8 @@ export async function runProcess(args: string[], options: {
       if (terminated) return;
       terminated = error;
       if (!child.pid) return;
-      if (process.platform === "win32") {
-        const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
-          windowsHide: true, stdio: "ignore",
-        });
-        killer.on("error", () => { child.kill(); });
-      } else {
-        try { process.kill(-child.pid, "SIGKILL"); }
-        catch { child.kill("SIGKILL"); }
-      }
+      try { process.kill(-child.pid, "SIGKILL"); }
+      catch { child.kill("SIGKILL"); }
     };
     const abort = () => terminate(new Error("E2E process aborted"));
     const timer = setTimeout(() => terminate(new Error("E2E process timed out")), options.timeoutMs ?? 180_000);
@@ -123,6 +116,15 @@ export async function scenario(context: TestContext, name: string, run: (fixture
     report.durationMs = Date.now() - startedAt;
     await writeFile(join(root, "result.json"), JSON.stringify(report, null, 2) + "\n");
   };
+  context.after(async () => {
+    // node:test can end a timed-out test before its async body reaches finally.
+    // The suite report must not retain a misleading "running" result.
+    if (report.status === "running") {
+      report.status = "failed";
+      report.error = context.signal.aborted ? "E2E scenario aborted before completion" : "E2E scenario did not settle";
+      await saveReport();
+    }
+  });
   try {
     await run({
       root, cwd, sessionDirectory,
@@ -167,6 +169,7 @@ export async function scenario(context: TestContext, name: string, run: (fixture
         }
       },
     });
+    context.signal.throwIfAborted();
     report.status = "passed";
   } catch (error) {
     report.status = "failed";

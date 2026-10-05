@@ -15,7 +15,7 @@ const [cwd,stage]=process.argv.slice(2); let checks=0,passed=0;const failures=[]
 async function check(name,fn){checks++;try{await fn();passed++;}catch(e){failures.push(name+': '+e.message);}}
 if(stage==='amount') await check('integer cents and rejection',async()=>{const {quote}=await import(pathToFileURL(join(cwd,'lib/quote.mts')));assert.deepEqual(quote(2,1990,1000),{subtotalCents:3980,discountCents:398,totalCents:3582});assert.throws(()=>quote(0,1990,1000));});
 else for(let i=0;i<2;i++) await check('real HTTP and persistent config restart '+i,async()=>{
- const p=spawn(process.execPath,[join(cwd,'app/server.mts')],{cwd,windowsHide:true,stdio:['ignore','pipe','pipe']});const closed=new Promise(r=>p.once('close',r));let error='';p.stderr.on('data',d=>error+=d);
+ const p=spawn(process.execPath,[join(cwd,'app/server.mts')],{cwd,stdio:['ignore','pipe','pipe']});const closed=new Promise(r=>p.once('close',r));let error='';p.stderr.on('data',d=>error+=d);
  try {const port=await new Promise((resolve,reject)=>{let s='';const timer=setTimeout(()=>reject(new Error('service startup timeout '+error)),8000);p.stdout.on('data',d=>{s+=d;if(s.includes('\\n')){clearTimeout(timer);try{resolve(JSON.parse(s.split('\\n')[0]).port);}catch(e){reject(e);}}});p.on('exit',()=>{clearTimeout(timer);reject(new Error('service exited '+error));});});
  const send=(body)=>fetch('http://127.0.0.1:'+port+'/quote',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
  const good=await send({quantity:2,unitPriceCents:1990});assert.equal(good.status,200);assert.deepEqual(await good.json(),{subtotalCents:3980,discountCents:398,totalCents:3582});assert.equal((await send({quantity:0,unitPriceCents:1990})).status,400);

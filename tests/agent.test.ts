@@ -146,9 +146,11 @@ test("steering enters after the entire current tool batch", async (t) => {
   f.cleanupAfter(() => session.close());
   const task = session.submit("original");
   await entered.promise;
-  assert.equal(await session.steer("new direction"), "queued");
+  assert.equal(await session.steer("new direction", { inputId: "active-steer" }), "queued");
+  const steered = session.waitInput("active-steer");
   release.resolve();
   assert.equal((await task).status, "completed");
+  assert.equal((await steered).status, "completed", "活动 steering 有独立 ID 的最终回执，且只能在消费与结果提交后完成");
   assert.deepEqual(order, ["first", "second"]);
   const messages = gateway.requests[1]!.messages;
   assert.equal(messages.at(-1)?.role, "user");

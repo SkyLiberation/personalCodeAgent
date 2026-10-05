@@ -2,7 +2,7 @@ import { mkdir, open, readFile, rename, access } from "node:fs/promises";
 import { join, relative, isAbsolute } from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import type { TaskState } from "../task-contracts.js";
-import type { WindowsHost } from "../platform/windows.js";
+import type { ExecutionHost } from "../platform/host.js";
 import { journalLines, seal } from "./journal.js";
 const fileHash = (content: string) => createHash("sha256").update(content).digest("hex");
 
@@ -20,7 +20,7 @@ async function synced(path: string, text: string): Promise<void> { const file = 
 
 /** Only the provably unstarted, closed v1 task has enough facts for automatic
  * migration. Active and terminal history remain read-only; no IDs are guessed. */
-export async function migrateUnstartedTask(root: string, state: TaskState, host: WindowsHost, registry: string, toolVersions: Record<string, string>, barrier?: (name: string) => Promise<void>): Promise<void> {
+export async function migrateUnstartedTask(root: string, state: TaskState, host: ExecutionHost, registry: string, toolVersions: Record<string, string>, barrier?: (name: string) => Promise<void>): Promise<void> {
   const directory = join(root, "tasks", state.id); const originalTask = join(directory, "events.jsonl"); const originalSession = join(root, "sessions", `${state.sessionId}.jsonl`);
   const taskLease = await host.acquire(join(directory, "execution.lease"));
   let sessionLease;

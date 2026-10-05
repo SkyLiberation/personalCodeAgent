@@ -26,8 +26,10 @@ test("LT-04E: real CLI repairs only incomplete tail, rejects corruption/future s
     assert.notEqual((await cli("resume")).exitCode, 0); assert.equal(await readFile(path, "utf8"), futureContent, "未来格式保留并拒绝执行");
     // Authored compatibility fixture derived from a genuinely verified run. It
     // validates old-format read/refusal; it is not presented as a new model run.
-    const legacy = structuredClone(records); legacy[0].state.schemaVersion = 1;
-    for (const record of legacy) { delete record.checksum; delete record.previousHash; }
+    // v1 never contained host state checkpoints. Build an actual v1-shaped
+    // sequence rather than downgrading new checkpoint records into that format.
+    const legacy = structuredClone(records.filter(record => record.type !== "state_checkpoint")); legacy[0].state.schemaVersion = 1;
+    for (const [index, record] of legacy.entries()) { record.seq = index + 1; delete record.checksum; delete record.previousHash; }
     const terminal = legacy.map(record => JSON.stringify(record)).join("\n") + "\n"; await writeFile(path, terminal);
     assert.equal(JSON.parse((await cli("status")).stdout).status, "succeeded");
     assert.notEqual((await cli("resume")).exitCode, 0); assert.equal(await readFile(path, "utf8"), terminal);
@@ -38,7 +40,7 @@ test("LT-04E: real CLI repairs only incomplete tail, rejects corruption/future s
     const legacySpec = await valueFixture(join(root, "legacy-fixture"), legacyCwd);
     const pending = await createTaskController({ spec: legacySpec, config: loadConfig(), dataDirectory }); const pendingId = pending.id; const sessionId = pending.state.sessionId; await pending.close();
     const oldTaskPath = join(dataDirectory, "tasks", pendingId, "events.jsonl"); const oldSessionPath = join(dataDirectory, "sessions", `${sessionId}.jsonl`);
-    const oldTask = JSON.parse((await readFile(oldTaskPath, "utf8")).trim()); oldTask.state.schemaVersion = 1; delete oldTask.checksum; delete oldTask.previousHash;
+    const oldTask = JSON.parse((await readFile(oldTaskPath, "utf8")).trim().split("\n")[0]!); oldTask.state.schemaVersion = 1; delete oldTask.checksum; delete oldTask.previousHash;
     const oldSession = JSON.parse((await readFile(oldSessionPath, "utf8")).trim()); oldSession.schemaVersion = 1;
     const taskSource = JSON.stringify(oldTask) + "\n", sessionSource = JSON.stringify(oldSession) + "\n"; await writeFile(oldTaskPath, taskSource); await writeFile(oldSessionPath, sessionSource);
     const interrupted = phase2Worker(root, "resume", pendingId, "migration_logs_synced"); context.after(() => interrupted.close());

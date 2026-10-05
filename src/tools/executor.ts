@@ -1,4 +1,4 @@
-import type { AgentTool, ToolCall, ToolContext, ToolDescriptor, ToolResult } from "../contracts.js";
+import type { AgentTool, ToolCall, ToolContext, ToolDescriptor, ToolResult, ToolPolicyContext, ToolPolicyDecision } from "../contracts.js";
 import { errorText, SecretRedactor, throwIfAborted } from "../security.js";
 
 export interface ExecutionHooks {
@@ -7,7 +7,10 @@ export interface ExecutionHooks {
   exec?: NonNullable<ToolContext["exec"]>;
   progress(callId: string, text: string): Promise<void>;
   artifact(text: string): Promise<string>;
+  policy?(call: ToolCall, decision: ToolPolicyDecision): Promise<void>;
 }
+/** Rejected before intent/reservation; ordinary model mistakes may be corrected. */
+export class ToolPreparationError extends Error {}
 
 export class ToolExecutor {
   private readonly tools: Map<string, AgentTool>;
@@ -19,6 +22,8 @@ export class ToolExecutor {
       noShell?: boolean;
       maxOutputChars?: number;
       redactor?: SecretRedactor;
+      policy?: (context: ToolPolicyContext) => Promise<ToolPolicyDecision>;
+      confirm?: (context: ToolPolicyContext, reason: string) => Promise<boolean>;
     } = {},
   ) {
     this.tools = new Map(tools.map((tool) => [tool.name, tool]));
@@ -34,6 +39,10 @@ export class ToolExecutor {
       name, description, parameters,
     }));
   }
+  parallelSafe(call: ToolCall): boolean {
+    const tool = this.tools.get(call.name);
+    return !!tool && this.allowed(tool) && tool.effect === "read" && tool.replay === "safe" && tool.parallelSafe === true;
+  }
 
   async execute(call: ToolCall, signal: AbortSignal, hooks: ExecutionHooks): Promise<ToolResult> {
     throwIfAborted(signal);
@@ -46,8 +55,23 @@ export class ToolExecutor {
     } catch (error) {
       return { text: `参数验证失败：${errorText(error)}`, isError: true, code: "invalid_arguments" };
     }
+    if (this.options.policy) {
+      const context: ToolPolicyContext = { tool, arguments: args, callId: call.id, signal };
+      let decision = await this.options.policy(context);
+      if (decision.action === "confirm") {
+        const allowed = await this.options.confirm?.(context, decision.reason) ?? false;
+        decision = allowed ? { action: "allow" } : { action: "deny", reason: decision.reason };
+      }
+      throwIfAborted(signal); await hooks.policy?.(call, decision);
+      if (decision.action !== "allow") return { text: `policy_denied: ${decision.reason}`, isError: true, code: "policy_denied" };
+    }
     // A persistence failure must stop the run before any side effect happens.
-    const operationId = await hooks.intent({ ...call, arguments: args }, tool.replay);
+    let operationId: void | string;
+    try { operationId = await hooks.intent({ ...call, arguments: args }, tool.replay); }
+    catch (error) {
+      if (error instanceof ToolPreparationError) return { text: error.message, isError: true, code: "tool_precondition" };
+      throw error;
+    }
     throwIfAborted(signal);
     let result: ToolResult;
     try {

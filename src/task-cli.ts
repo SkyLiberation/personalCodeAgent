@@ -1,4 +1,6 @@
-import { readFile } from "node:fs/promises";
+import { readFile, open } from "node:fs/promises";
+import { PiModelGateway } from "./model/pi-gateway.js";
+import { draftGoal, confirmGoal, type GoalDraft } from "./harness/planning.js";
 import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { randomUUID } from "node:crypto";
@@ -15,16 +17,27 @@ async function readSpec(file: string): Promise<TaskDefinition> {
 export async function taskCli(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
     spec: { type: "string" }, "data-dir": { type: "string" }, "max-turns": { type: "string" }, "command-id": { type: "string" }, "expected-version": { type: "string" },
+    limits: { type: "string" }, reason: { type: "string" }, output: { type: "string" }, draft: { type: "string" }, "confirm-hash": { type: "string" },
     wait: { type: "boolean" }, "wait-timeout-ms": { type: "string" }, json: { type: "boolean" }, readonly: { type: "boolean" }, "no-shell": { type: "boolean" }, help: { type: "boolean", short: "h" },
   } });
-  if (values.help) { console.log("task start --spec <JSON>\ntask status|resume <id>\ntask pause|cancel <id> --command-id <id> [--wait]\ntask update <id> --spec <JSON> --expected-version <n> --command-id <id> [--wait]\ntask command-status <id> <command-id>\nAll commands accept --data-dir <root>."); return; }
+  if (values.help) { console.log("task draft --spec <host-template JSON> --output <draft JSON>\ntask start --spec <JSON> | --draft <JSON> --confirm-hash <hash>\ntask status|resume <id>\ntask pause|cancel <id> --command-id <id> [--wait]\ntask update <id> --spec <JSON> --expected-version <n> --command-id <id> [--wait]\ntask adjust-budget <id> --limits <JSON> --expected-version <budget version> --command-id <id> --reason <text> [--wait]\ntask command-status <id> <command-id>\nAll commands accept --data-dir <root>."); return; }
   const directory = resolve(values["data-dir"] ?? defaultTaskDirectory); const [action, id, commandId] = positionals;
+  if (action === "draft") {
+    if (!values.spec || !values.output) throw new Error("draft 需要 --spec 宿主合同模板与 --output");
+    const template = await readSpec(values.spec);
+    const draft = await draftGoal({ outcome: template.outcome, workspaceRoot: template.workspaceRoot, constraints: template.constraints,
+      writablePaths: template.scope?.writablePaths ?? ["."], verifiers: template.verifiers, limits: template.limits, gateway: new PiModelGateway(loadConfig()), signal: new AbortController().signal });
+    const file = await open(resolve(values.output), "wx", 0o600); try { await file.writeFile(JSON.stringify(draft, null, 2)); await file.sync(); } finally { await file.close(); }
+    console.log(JSON.stringify({ status: draft.status, hash: draft.hash, path: resolve(values.output) })); return;
+  }
   if (action === "status") { if (!id) throw new Error("需要任务 ID"); console.log(JSON.stringify(await TaskRepository.read(directory, id), null, 2)); return; }
   if (action === "command-status") { if (!id || !commandId) throw new Error("需要任务和命令 ID"); console.log(JSON.stringify(await readTaskCommandResult({ taskId: id, dataDirectory: directory, commandId }) ?? null)); return; }
-  if (["pause", "cancel", "update"].includes(action ?? "")) {
+  if (["pause", "cancel", "update", "adjust-budget"].includes(action ?? "")) {
     if (!id || !values["command-id"]) throw new Error("需要任务 ID 和 --command-id");
     let command: TaskCommand;
     if (action === "update") { if (!values.spec || !values["expected-version"]) throw new Error("update 需要 --spec 和 --expected-version"); command = { id: values["command-id"], type: "update", spec: await readSpec(values.spec), expectedVersion: Number(values["expected-version"]) }; }
+    else if (action === "adjust-budget") { if (!values.limits || !values.reason || !values["expected-version"]) throw new Error("adjust-budget 需要 --limits --reason --expected-version");
+      command = { id: values["command-id"], type: "adjust_budget", limits: JSON.parse(await readFile(resolve(values.limits), "utf8")), reason: values.reason, expectedVersion: Number(values["expected-version"]) }; }
     else command = { id: values["command-id"], type: action as "pause" | "cancel" };
     let result = await sendTaskCommand({ taskId: id, dataDirectory: directory, command });
     // No credentials or model request are needed by this short-lived control worker.
@@ -45,9 +58,11 @@ export async function taskCli(args: string[]): Promise<void> {
   if (action !== "start" && action !== "resume") throw new Error("未知 task 命令，参见 task --help");
   const config = loadConfig();
   if (values["max-turns"]) { const n = Number(values["max-turns"]); if (!Number.isSafeInteger(n) || n < 1) throw new Error("--max-turns 必须为正整数"); config.maxTurns = n; }
-  if (action === "start" && !values.spec || action === "resume" && !id) throw new Error("start 需要 --spec；resume 需要任务 ID");
+  if (action === "start" && !values.spec && !values.draft || action === "resume" && !id) throw new Error("start 需要 --spec / --draft；resume 需要任务 ID");
   const common = { config, dataDirectory: directory, noShell: values["no-shell"] ?? false, readonly: values.readonly ?? false };
-  const controller = action === "start" ? await createTaskController({ ...common, spec: await readSpec(values.spec!) }) : await openTaskController({ ...common, taskId: id! });
+  const controller = action === "start" ? values.draft
+    ? await confirmGoal(JSON.parse(await readFile(resolve(values.draft), "utf8")) as GoalDraft, { hash: values["confirm-hash"] ?? "", confirmed: true }, common)
+    : await createTaskController({ ...common, spec: await readSpec(values.spec!) }) : await openTaskController({ ...common, taskId: id! });
   const cancel = () => { void sendTaskCommand({ taskId: controller.id, dataDirectory: directory, command: { id: randomUUID(), type: "cancel" } }).catch(error => { console.error(`取消未持久化：${String(error)}`); process.exitCode = 1; void controller.close(); }); };
   process.once("SIGINT", cancel); process.once("SIGTERM", cancel);
   controller.subscribe(event => { if (values.json) process.stdout.write(JSON.stringify(event) + "\n"); else if (event.type !== "agent_event") process.stderr.write(`[${event.type}] ${event.taskId}\n`); });
